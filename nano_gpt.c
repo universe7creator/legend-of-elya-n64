@@ -263,8 +263,8 @@ static void embed_lookup(const SGAIHeader *hdr, uint8_t token, int16_t *out)
     for (int i = 0; i < SGAI_N_EMBED; i++) {
         /* Q8 embedding: int8 weight, scale = 1/8 baked in during export
          * Python exports emb as int8 with max_abs clamped to ~1.0 range
-         * Convert to Q8.7: out = w * FP_ONE / 8 (matches Python's /8 scale) */
-        out[i] = (int16_t)(((int32_t)emb_table[offset + i] * FP_ONE) / 8);
+         * Convert to Q8.7: direct cast — Python exports em2≈0.9922, so int8≈Q8.7 already */
+        out[i] = (int16_t)emb_table[offset + i];
     }
 }
 
@@ -410,7 +410,7 @@ static void project_to_logits(const SGAIHeader *hdr, const int16_t *x,
         int offset = v * SGAI_N_EMBED;
         for (int i = 0; i < SGAI_N_EMBED; i++) {
             /* e_val in Q8.7 (same scale as embed_lookup) */
-            int16_t e_val = (int16_t)(((int32_t)emb_table[offset + i] * FP_ONE) / 8);
+            int16_t e_val = (int16_t)emb_table[offset + i];
             acc += (int32_t)e_val * (int32_t)x[i];
         }
         logits[v] = fp_add_sat(acc >> 7);
