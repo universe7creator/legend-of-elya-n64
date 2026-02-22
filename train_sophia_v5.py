@@ -600,7 +600,7 @@ def batch(bs=512):
     y = torch.stack([torch.tensor(data_arr[i+1:i+CTX+1], dtype=torch.long) for i in ix])
     return x.to(device), y.to(device)
 
-N_STEPS = 100000
+N_STEPS = 30000
 opt = torch.optim.AdamW(model.parameters(), lr=5e-3, weight_decay=0.01, betas=(0.9, 0.95))
 sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=N_STEPS, eta_min=5e-5)
 
@@ -655,34 +655,36 @@ for p in test_prompts:
     result = gen(p, 80)[:80]
     print(f"  [{p}] → {result}")
 
-# ── Q4 export ──────────────────────────────────────────────────────────────
-def q4(tensor):
-    w = tensor.detach().cpu().float().numpy().flatten()
-    pad = (-len(w)) % Q4_BLOCK
-    if pad: w = np.concatenate([w, np.zeros(pad)])
-    nb = len(w) // Q4_BLOCK
-    bl = w.reshape(nb, Q4_BLOCK)
-    bm = np.maximum(np.abs(bl).max(axis=1, keepdims=True), 1e-6)
-    sc = (bm / 7.).flatten().astype(np.float16)
-    wq = np.clip(np.round(bl / bm * 7), -8, 7).astype(np.int8)
-    u4 = (wq + 8).astype(np.uint8).flatten()
-    return (u4[0::2] | (u4[1::2] << 4)).astype(np.uint8), sc
+# ── Q8 export ─────────────────────────────────────────────────────────────────────────────
+Q_BLOCK = 32  # Same block size as Q4_BLOCK
 
-out_path = "/home/sophia5070node/n64dev/legend_of_elya_rom/filesystem/sophia_weights.bin"
+def q8(tensor):
+    w = tensor.detach().cpu().float().numpy().flatten()
+    pad = (-len(w)) % Q_BLOCK
+    if pad: w = np.concatenate([w, np.zeros(pad)])
+    nb = len(w) // Q_BLOCK
+    bl = w.reshape(nb, Q_BLOCK)
+    bm = np.maximum(np.abs(bl).max(axis=1, keepdims=True), 1e-6)
+    sc = (bm / 127.).flatten().astype(np.float16)   # scale = max/127
+    wq = np.clip(np.round(bl / bm * 127), -128, 127).astype(np.int8)
+    return wq.flatten(), sc  # int8 array, not nibble-packed
+
+print("Format: Q8 (8-bit weights)")
+out_path = "/home/sophia5070node/n64dev/legend_of_elya_rom/filesystem/sophia_weights.bin"  # Q8 format
 buf = bytearray()
 # Header: magic stored LE as 0x49414553 which reads as 0x53454149 on BE N64
 buf += struct.pack('<IBHBHBB', 0x49414553, N_LAYERS, N_EMBED, N_HEADS, VOCAB, CTX, 0)
 
-# Embedding: normalize to em=0.875 so C decode (nibble-8)/8 is exact
+# Embedding: Q8 int8
 ew = model.emb.weight.detach().cpu().float().numpy()
 em = max(np.abs(ew).max(), 1e-6)
-target_em = 7.0 / 8.0  # = 0.875
+# Scale so max abs = 0.875 (same normalization)
+target_em = 127.0 / 128.0
 ew_scaled = ew * (target_em / em)
 em2 = max(np.abs(ew_scaled).max(), 1e-6)
-eq = np.clip(np.round(ew_scaled / em2 * 7), -8, 7).astype(np.int8)
-eu = (eq + 8).astype(np.uint8).flatten()
-buf += bytes((eu[0::2] | (eu[1::2] << 4)).astype(np.uint8))
-print(f"Embedding: em={em:.4f} → scaled to {em2:.4f} (target 0.875)")
+eq = np.clip(np.round(ew_scaled / em2 * 127), -128, 127).astype(np.int8)
+buf += bytes(eq.flatten().astype(np.int8).tobytes())
+print(f"Embedding Q8: em={em:.4f} → scaled to {em2:.4f}")
 
 # Layers
 for li, blk in enumerate(model.blocks):
@@ -691,7 +693,7 @@ for li, blk in enumerate(model.blocks):
         ('wv', blk.attn.wv.weight), ('wo', blk.attn.wo.weight),
         ('wff1', blk.wff1.weight),  ('wff2', blk.wff2.weight),
     ]
-    ps = [(n, *q4(w)) for n, w in ws]
+    ps = [(n, *q8(w)) for n, w in ws]
     for n, p, s in ps: buf += bytes(p)
     for n, p, s in ps: buf += bytes(s.tobytes())
     print(f"Layer {li} done")
